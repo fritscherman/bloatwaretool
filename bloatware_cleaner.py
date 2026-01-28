@@ -10,6 +10,8 @@ import sys
 import subprocess
 import logging
 import json
+import ctypes
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -136,7 +138,6 @@ class BloatwareRemover:
     def is_admin(self):
         """Check if the script is running with administrator privileges."""
         try:
-            import ctypes
             return ctypes.windll.shell32.IsUserAnAdmin() != 0
         except Exception:
             # If we can't determine (e.g., not on Windows), assume we need to check differently
@@ -158,7 +159,7 @@ class BloatwareRemover:
         
         try:
             result = subprocess.run(
-                ["powershell", "-Command", command],
+                ["powershell.exe", "-Command", command],
                 capture_output=True,
                 text=True,
                 check=check
@@ -168,7 +169,8 @@ class BloatwareRemover:
             logger.error(f"PowerShell command failed: {e}")
             if check:
                 raise
-            return e
+            # Return a dummy CompletedProcess for consistency
+            return subprocess.CompletedProcess(args=command, returncode=e.returncode, stdout=e.stdout, stderr=e.stderr)
 
     def remove_appx_packages(self):
         """Remove bloatware AppX packages."""
@@ -304,7 +306,6 @@ class BloatwareRemover:
             "watson.ppe.telemetry.microsoft.com",
             "telemetry.appex.bing.net",
             "telemetry.urs.microsoft.com",
-            "telemetry.appex.bing.net:443",
             "settings-sandbox.data.microsoft.com",
             "vortex-sandbox.data.microsoft.com",
             "survey.watson.microsoft.com",
@@ -332,10 +333,15 @@ class BloatwareRemover:
             return
         
         try:
-            # Read existing hosts file
+            # Backup and read existing hosts file
             existing_content = ""
             if hosts_file.exists():
-                with open(hosts_file, 'r') as f:
+                # Create backup
+                backup_file = hosts_file.with_suffix('.backup')
+                shutil.copy2(hosts_file, backup_file)
+                logger.info(f"Created backup: {backup_file}")
+                
+                with open(hosts_file, 'r', encoding='utf-8') as f:
                     existing_content = f.read()
             
             # Add blocker entries
@@ -346,11 +352,12 @@ class BloatwareRemover:
                     new_entries.append(entry)
             
             if new_entries:
-                with open(hosts_file, 'a') as f:
+                with open(hosts_file, 'a', encoding='utf-8') as f:
                     f.write("\n# Bloatware Tool - Telemetry Blocking\n")
                     f.write("\n".join(new_entries))
                     f.write("\n")
                 logger.info(f"Added {len(new_entries)} telemetry domains to hosts file")
+                self.results.setdefault("telemetry_domains_blocked", len(new_entries))
             else:
                 logger.info("All telemetry domains already blocked in hosts file")
                 
@@ -382,8 +389,10 @@ class BloatwareRemover:
                 self.run_powershell(cmd_set, check=False)
                 
                 logger.info(f"Disabled Edge feature: {name}")
+                self.results.setdefault("edge_features_disabled", []).append(name)
             except Exception as e:
                 logger.warning(f"Failed to disable Edge feature {name}: {str(e)}")
+                self.results.setdefault("edge_features_failed", []).append({"feature": name, "error": str(e)})
 
     def generate_report(self):
         """Generate a summary report of all actions taken."""
@@ -414,7 +423,7 @@ class BloatwareRemover:
         
         # Save JSON report
         report_file = LOG_DIR / f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(report_file, 'w') as f:
+        with open(report_file, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=2)
         logger.info(f"JSON report saved to: {report_file}")
 
@@ -428,10 +437,13 @@ class BloatwareRemover:
             logger.info("=" * 60)
         
         # Check admin privileges
-        if not self.dry_run and not self.is_admin():
-            logger.error("This script requires administrator privileges!")
-            logger.error("Please run as administrator.")
-            return False
+        if not self.is_admin():
+            if self.dry_run:
+                logger.warning("Not running with administrator privileges - dry-run may show incomplete results")
+            else:
+                logger.error("This script requires administrator privileges!")
+                logger.error("Please run as administrator.")
+                return False
         
         try:
             # Execute all cleanup operations
