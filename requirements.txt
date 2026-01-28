@@ -1,0 +1,5 @@
+# Windows 11 Bloatware Removal Tool
+# This tool uses only Python standard library modules
+# No external dependencies required
+
+# Python 3.8+ is required for the tool to function properly
